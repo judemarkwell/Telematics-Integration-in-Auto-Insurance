@@ -62,10 +62,10 @@ class PricingService:
     def __init__(self):
         """Initialize the pricing service."""
         self.risk_thresholds = {
-            RiskCategory.LOW: 0.3,
-            RiskCategory.MEDIUM: 0.6,
-            RiskCategory.HIGH: 0.8,
-            RiskCategory.VERY_HIGH: 1.0
+            RiskCategory.LOW: 30,      # 0-30: Low risk
+            RiskCategory.MEDIUM: 60,   # 30-60: Medium risk  
+            RiskCategory.HIGH: 80,     # 60-80: High risk
+            RiskCategory.VERY_HIGH: 100 # 80-100: Very high risk
         }
         
         # Pricing adjustment factors
