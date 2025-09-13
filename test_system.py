@@ -158,17 +158,15 @@ async def test_complete_system():
             policy_duration_months=12
         )
         
-        pricing_result = pricing_service.calculator.calculate_premium(
-            policy, risk_score, pricing_factors
-        )
+        pricing_result = pricing_service.calculate_premium(pricing_factors)
         
-        print(f"   💵 Original Premium: ${pricing_result.original_premium.amount:.2f}")
-        print(f"   💵 Adjusted Premium: ${pricing_result.adjusted_premium.amount:.2f}")
+        print(f"   💵 Original Premium: ${pricing_result.base_premium:.2f}")
+        print(f"   💵 Adjusted Premium: ${pricing_result.adjusted_premium:.2f}")
         if pricing_result.discount_percentage > 0:
             print(f"   🎉 Discount: {pricing_result.discount_percentage:.1f}%")
-        elif pricing_result.surcharge_percentage > 0:
-            print(f"   📈 Surcharge: {pricing_result.surcharge_percentage:.1f}%")
-        print(f"   📋 Applied Factors: {', '.join(pricing_result.factors_applied)}")
+        elif pricing_result.discount_percentage < 0:
+            print(f"   📈 Surcharge: {abs(pricing_result.discount_percentage):.1f}%")
+        print(f"   📋 Applied Factors: {', '.join(pricing_result.factors_applied.keys())}")
     else:
         print("   ❌ No pricing calculation performed")
     print()
@@ -190,16 +188,16 @@ async def test_complete_system():
     
     # Driving insights
     insights = dashboard_service.get_driving_insights(driver_id)
-    print(f"   🛡️  Safety Score: {insights.safety_score:.1f}")
-    print(f"   ⚡ Efficiency Score: {insights.efficiency_score:.1f}")
-    print(f"   📈 Consistency Score: {insights.consistency_score:.1f}")
-    print(f"   💡 Recommendations: {len(insights.recommendations)} suggestions")
+    print(f"   🛡️  Total Trips: {insights['total_trips']}")
+    print(f"   ⚡ Average Score: {insights['average_score']:.1f}")
+    print(f"   📈 Improvement Trend: {insights['improvement_trend']}")
+    print(f"   💡 Recommendations: {len(insights['recommendations'])} suggestions")
     
     # Risk breakdown
     breakdown = dashboard_service.get_risk_breakdown(driver_id)
     print(f"   🔍 Overall Score: {breakdown['overall_score']:.1f}")
-    print(f"   🎯 Category: {breakdown['category']}")
-    print(f"   📊 Event Rate: {breakdown['event_rate']:.1f} events/hour")
+    print(f"   🎯 Confidence: {breakdown['confidence']:.2f}")
+    print(f"   📊 Factors: {len(breakdown['factors'])} risk factors")
     print()
     
     # Test 6: Recent trips
@@ -209,8 +207,8 @@ async def test_complete_system():
     recent_trips = dashboard_service.get_recent_trips(driver_id, limit=5)
     print(f"   📋 Found {len(recent_trips)} recent trips")
     for trip in recent_trips:
-        print(f"   🚗 Trip {trip.trip_id[:8]}... - {trip.duration_minutes}min, "
-              f"{trip.distance_km:.1f}km, Score: {trip.score:.1f}")
+        print(f"   🚗 Trip {trip['trip_id'][:8]}... - {trip['duration_minutes']}min, "
+              f"{trip['distance_km']:.1f}km, Score: {trip['score']:.1f}")
     print()
     
     print("✅ All tests completed successfully!")
