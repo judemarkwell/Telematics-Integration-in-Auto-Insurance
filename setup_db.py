@@ -591,6 +591,306 @@ def create_sample_data():
         return created_drivers, created_vehicles, created_policies
 
 
+def create_personalized_simulation_data(license_number: str, driver_index: int):
+    """Create personalized telematics data for a specific driver."""
+    import random
+    from datetime import datetime, timedelta
+    from src.data_collection.telematics_simulator import (
+        TelematicsDataCollector, TelematicsSimulator, TelematicsDataPoint as SimDataPoint,
+        RoadType, WeatherCondition, VehicleProfile, LocationRiskProfile as SimLocationProfile
+    )
+    from src.data_processing.data_processor import TelematicsDataProcessor
+    from src.domain.value_objects import Coordinate
+    from src.db.engine import get_session_context
+    from src.db.repositories import DriverRepository, TripRepository
+    
+    # Define different risk profiles for variety
+    risk_profiles = [
+        # Low risk drivers (indices 0-4)
+        {"hard_braking_freq": 0.1, "speeding_freq": 0.05, "night_driving": 0.1, "avg_speed_factor": 0.9},
+        {"hard_braking_freq": 0.15, "speeding_freq": 0.08, "night_driving": 0.12, "avg_speed_factor": 0.92},
+        {"hard_braking_freq": 0.12, "speeding_freq": 0.06, "night_driving": 0.08, "avg_speed_factor": 0.88},
+        {"hard_braking_freq": 0.18, "speeding_freq": 0.1, "night_driving": 0.15, "avg_speed_factor": 0.95},
+        {"hard_braking_freq": 0.08, "speeding_freq": 0.04, "night_driving": 0.06, "avg_speed_factor": 0.85},
+        
+        # Medium risk drivers (indices 5-9)
+        {"hard_braking_freq": 0.3, "speeding_freq": 0.2, "night_driving": 0.25, "avg_speed_factor": 1.1},
+        {"hard_braking_freq": 0.35, "speeding_freq": 0.22, "night_driving": 0.3, "avg_speed_factor": 1.15},
+        {"hard_braking_freq": 0.25, "speeding_freq": 0.18, "night_driving": 0.2, "avg_speed_factor": 1.05},
+        {"hard_braking_freq": 0.4, "speeding_freq": 0.25, "night_driving": 0.35, "avg_speed_factor": 1.2},
+        {"hard_braking_freq": 0.28, "speeding_freq": 0.15, "night_driving": 0.22, "avg_speed_factor": 1.08},
+        
+        # High risk drivers (indices 10-14)
+        {"hard_braking_freq": 0.6, "speeding_freq": 0.45, "night_driving": 0.4, "avg_speed_factor": 1.3},
+        {"hard_braking_freq": 0.7, "speeding_freq": 0.5, "night_driving": 0.45, "avg_speed_factor": 1.35},
+        {"hard_braking_freq": 0.55, "speeding_freq": 0.4, "night_driving": 0.35, "avg_speed_factor": 1.25},
+        {"hard_braking_freq": 0.8, "speeding_freq": 0.6, "night_driving": 0.5, "avg_speed_factor": 1.4},
+        {"hard_braking_freq": 0.65, "speeding_freq": 0.48, "night_driving": 0.42, "avg_speed_factor": 1.32}
+    ]
+    
+    profile = risk_profiles[driver_index % len(risk_profiles)]
+    
+    with get_session_context() as session:
+        driver_repo = DriverRepository()
+        trip_repo = TripRepository()
+        
+        # Get driver by license number
+        driver = driver_repo.get_by_license(session, license_number)
+        if not driver:
+            print(f"   ⚠️  Driver with license {license_number} not found")
+            return
+        
+        # Get driver's vehicle for trip creation
+        from src.db.repositories import VehicleRepository
+        vehicle_repo = VehicleRepository()
+        vehicles = vehicle_repo.get_by_driver(session, driver.id)
+        
+        if not vehicles:
+            print(f"   ⚠️  No vehicle found for driver {license_number}")
+            return
+            
+        vehicle = vehicles[0]  # Use first vehicle
+        
+        # Create multiple trips with varying characteristics
+        num_trips = random.randint(8, 25)  # Vary number of trips per driver
+        
+        for trip_num in range(num_trips):
+            # Generate trip with personalized characteristics
+            trip_data = generate_personalized_trip_data(profile, trip_num, driver_index)
+            trip_data["driver_id"] = driver.id
+            trip_data["vehicle_id"] = vehicle.id
+            
+            # Create trip record (remove event count fields)
+            trip_data_clean = {k: v for k, v in trip_data.items() if k not in [
+                'hard_braking_events', 'hard_acceleration_events', 'speeding_events', 'sharp_turn_events'
+            ]}
+            trip = trip_repo.create(session, **trip_data_clean)
+            
+            # Create individual driving events
+            from src.db.repositories import DrivingEventRepository
+            event_repo = DrivingEventRepository()
+            
+            events_to_create = [
+                ('hard_brake', trip_data['hard_braking_events']),
+                ('hard_acceleration', trip_data['hard_acceleration_events']),
+                ('speeding', trip_data['speeding_events']),
+                ('sharp_turn', trip_data['sharp_turn_events'])
+            ]
+            
+            for event_type, count in events_to_create:
+                for _ in range(count):
+                    # Create random timestamp within trip duration
+                    trip_duration = (trip_data['end_time'] - trip_data['start_time']).total_seconds() / 60
+                    random_offset = random.uniform(0, trip_duration)
+                    event_time = trip_data['start_time'] + timedelta(minutes=random_offset)
+                    
+                    event_repo.create(session, **{
+                        'trip_id': trip.id,
+                        'event_type': event_type,
+                        'timestamp': event_time,
+                        'severity': random.uniform(0.3, 1.0),
+                        'latitude': trip_data['start_latitude'] + random.uniform(-0.001, 0.001),
+                        'longitude': trip_data['start_longitude'] + random.uniform(-0.001, 0.001),
+                        'details': f'{{"speed": {random.uniform(20, 80)}, "acceleration": {random.uniform(-5, 5)}}}'
+                    })
+
+
+def generate_personalized_trip_data(risk_profile: dict, trip_num: int, driver_index: int) -> dict:
+    """Generate personalized trip data based on risk profile."""
+    import random
+    import numpy as np
+    from datetime import datetime, timedelta
+    
+    # Base trip characteristics
+    base_distance = random.uniform(5, 50)  # km
+    base_duration = random.uniform(15, 120)  # minutes
+    
+    # Apply risk profile adjustments
+    avg_speed = (base_distance / (base_duration / 60)) * risk_profile["avg_speed_factor"]
+    max_speed = avg_speed * random.uniform(1.2, 1.8)
+    
+    # Calculate events based on risk profile
+    hard_braking_events = max(0, int(np.random.poisson(risk_profile["hard_braking_freq"] * base_distance)))
+    hard_acceleration_events = max(0, int(np.random.poisson(risk_profile["hard_braking_freq"] * 0.7 * base_distance)))
+    speeding_events = max(0, int(np.random.poisson(risk_profile["speeding_freq"] * base_distance)))
+    sharp_turn_events = max(0, int(np.random.poisson(risk_profile["hard_braking_freq"] * 0.5 * base_distance)))
+    
+    # Calculate overall score (lower score for higher risk)
+    base_score = 100
+    base_score -= hard_braking_events * 3
+    base_score -= hard_acceleration_events * 2
+    base_score -= speeding_events * 4
+    base_score -= sharp_turn_events * 2
+    overall_score = max(20, min(100, base_score + random.uniform(-5, 5)))
+    
+    # Random start location (vary by driver)
+    lat_base = 40.7128 + (driver_index * 0.1)  # Spread drivers across different areas
+    lon_base = -74.0060 + (driver_index * 0.1)
+    
+    start_lat = lat_base + random.uniform(-0.05, 0.05)
+    start_lon = lon_base + random.uniform(-0.05, 0.05)
+    end_lat = start_lat + random.uniform(-0.02, 0.02)
+    end_lon = start_lon + random.uniform(-0.02, 0.02)
+    
+    # Trip timing (some drivers drive more at night based on risk profile)
+    days_ago = random.randint(1, 30)
+    base_hour = 9 if random.random() > risk_profile["night_driving"] else 22
+    start_time = datetime.utcnow() - timedelta(days=days_ago, hours=random.randint(-2, 2)) + timedelta(hours=base_hour)
+    end_time = start_time + timedelta(minutes=base_duration)
+    
+    return {
+        "driver_id": None,  # Will be set by the caller
+        "vehicle_id": None,  # Will be set by the caller
+        "start_time": start_time,
+        "end_time": end_time,
+        "start_latitude": start_lat,
+        "start_longitude": start_lon,
+        "end_latitude": end_lat,
+        "end_longitude": end_lon,
+        "total_distance_km": base_distance,
+        "total_duration_minutes": base_duration,
+        "average_speed_kmh": avg_speed,
+        "max_speed_kmh": max_speed,
+        "hard_braking_events": hard_braking_events,
+        "hard_acceleration_events": hard_acceleration_events,
+        "speeding_events": speeding_events,
+        "sharp_turn_events": sharp_turn_events,
+        "overall_score": overall_score
+    }
+
+
+def calculate_and_store_risk_scores():
+    """Calculate and store risk scores for all drivers."""
+    from src.db.engine import get_session_context
+    from src.db.repositories import DriverRepository, TripRepository, RiskScoreRepository
+    from src.risk_scoring.risk_scorer import RiskScoringService
+    from src.data_processing.data_processor import TelematicsDataProcessor
+    import json
+    
+    risk_scorer = RiskScoringService()
+    data_processor = TelematicsDataProcessor()
+    
+    with get_session_context() as session:
+        driver_repo = DriverRepository()
+        trip_repo = TripRepository()
+        risk_repo = RiskScoreRepository()
+        
+        drivers = driver_repo.get_all(session)
+        
+        for driver in drivers:
+            trips = trip_repo.get_by_driver(session, driver.id)
+            
+            if trips:
+                # Convert trips to trip metrics for risk scoring
+                trip_metrics = []
+                from src.db.repositories import DrivingEventRepository
+                event_repo = DrivingEventRepository()
+                
+                for trip in trips:
+                    # Get driving events for this trip
+                    events = event_repo.get_by_trip(session, trip.id)
+                    
+                    # Count events by type
+                    event_counts = {'hard_brake': 0, 'hard_acceleration': 0, 'speeding': 0, 'sharp_turn': 0}
+                    for event in events:
+                        if event.event_type in event_counts:
+                            event_counts[event.event_type] += 1
+                    
+                    # Create a simple trip metric from trip data
+                    from src.data_processing.data_processor import TripMetrics
+                    
+                    from src.domain.value_objects import Distance, Speed
+                    from datetime import timedelta
+                    
+                    metric = TripMetrics(
+                        trip_id=str(trip.id),
+                        driver_id=str(trip.driver_id),
+                        start_time=trip.start_time,
+                        end_time=trip.end_time,
+                        total_distance=Distance(trip.total_distance_km, 'km'),
+                        total_duration=timedelta(minutes=trip.total_duration_minutes),
+                        average_speed=Speed(trip.average_speed_kmh, 'km/h'),
+                        max_speed=Speed(trip.max_speed_kmh, 'km/h'),
+                        hard_braking_events=event_counts['hard_brake'],
+                        hard_acceleration_events=event_counts['hard_acceleration'],
+                        speeding_events=event_counts['speeding'],
+                        sharp_turn_events=event_counts['sharp_turn'],
+                        night_driving_percentage=10.0,  # Mock data
+                        rush_hour_percentage=20.0,      # Mock data
+                        overall_score=trip.overall_score,
+                        highway_driving_percentage=30.0,     # Mock data
+                        city_driving_percentage=50.0,        # Mock data
+                        residential_driving_percentage=20.0, # Mock data
+                        weather_impact_score=85.0,  # Mock data
+                        road_quality_score=80.0,    # Mock data
+                        traffic_density_score=75.0  # Mock data
+                    )
+                    trip_metrics.append(metric)
+                
+                # Calculate risk score
+                risk_score = risk_scorer.calculate_risk_score(str(driver.id), trip_metrics)
+                
+                # Store in database
+                risk_repo.create(session, **{
+                    "driver_id": driver.id,
+                    "score": risk_score.score,
+                    "confidence": risk_score.confidence,
+                    "factors": json.dumps(risk_score.factors) if isinstance(risk_score.factors, list) else risk_score.factors,
+                    "calculated_at": risk_score.calculated_at
+                })
+
+
+def calculate_and_update_premiums():
+    """Calculate and update premiums for all drivers."""
+    from src.db.engine import get_session_context
+    from src.db.repositories import DriverRepository, PolicyRepository, RiskScoreRepository
+    from src.pricing_engine.pricing_calculator import PricingService, PricingFactors
+    
+    pricing_service = PricingService()
+    
+    with get_session_context() as session:
+        driver_repo = DriverRepository()
+        policy_repo = PolicyRepository()
+        risk_repo = RiskScoreRepository()
+        
+        drivers = driver_repo.get_all(session)
+        
+        for driver in drivers:
+            policies = policy_repo.get_by_driver(session, driver.id)
+            risk_scores = risk_repo.get_by_driver(session, driver.id)
+            
+            if policies and risk_scores:
+                policy = policies[0]  # Use first policy
+                latest_risk_score = max(risk_scores, key=lambda rs: rs.calculated_at)
+                
+                # Create pricing factors
+                pricing_factors = PricingFactors(
+                    base_premium=policy.base_premium,
+                    risk_score=latest_risk_score.score,  # Already on 0-100 scale
+                    driving_experience_years=5,
+                    vehicle_age=3,
+                    annual_mileage=15000,
+                    location_risk_factor=1.0,
+                    time_since_last_claim=24,
+                    credit_score=750,
+                    policy_duration_months=12,
+                    vehicle_safety_rating=4.0,
+                    claims_history=0,
+                    age=30,
+                    marital_status="single",
+                    education_level="college",
+                    occupation="professional"
+                )
+                
+                # Calculate new premium
+                pricing_result = pricing_service.calculate_premium(pricing_factors)
+                
+                # Update policy with new premium
+                policy.current_premium = pricing_result.adjusted_premium
+                session.add(policy)
+                session.commit()
+
+
 async def main():
     """Initialize database with tables and sample data."""
     print("🚀 Initializing Telematics Insurance Database")
@@ -607,6 +907,28 @@ async def main():
     
     # Create sample data
     drivers, vehicles, policies = create_sample_data()
+    
+    # Create personalized simulation data for all drivers
+    print("\n🎯 Creating personalized simulation data for drivers...")
+    driver_license_numbers = [
+        "DL123456789", "DL987654321", "DL456789123", "DL789123456", "DL321654987",
+        "DL654987321", "DL147258369", "DL369258147", "DL258147369", "DL741852963",
+        "DL963852741", "DL852741963", "DL159753486", "DL486159753", "DL753486159"
+    ]
+    
+    for i, license_number in enumerate(driver_license_numbers):
+        create_personalized_simulation_data(license_number, i)
+        print(f"   ✅ Created personalized data for driver {i+1}/{len(driver_license_numbers)}")
+    
+    # Calculate and store risk scores for all drivers
+    print("\n🧠 Calculating risk scores for all drivers...")
+    calculate_and_store_risk_scores()
+    print("   ✅ Risk scores calculated and stored")
+    
+    # Calculate and update premiums
+    print("\n💰 Calculating personalized premiums...")
+    calculate_and_update_premiums()
+    print("   ✅ Premiums calculated and updated")
     
     print("\n🎉 Database initialization complete!")
     print("You can now run the application with:")

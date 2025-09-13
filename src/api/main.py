@@ -5,14 +5,17 @@ This module provides REST API endpoints for the telematics insurance system,
 including data collection, risk scoring, pricing, and dashboard functionality.
 """
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import asyncio
 import uuid
+import os
+from pathlib import Path
 
 from ..config.settings import config
 from ..data_collection.telematics_simulator import TelematicsDataCollector, Coordinate
@@ -104,6 +107,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files
+static_path = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+
 # Initialize services
 data_collector = TelematicsDataCollector()
 data_processor = TelematicsDataProcessor()
@@ -120,30 +127,25 @@ active_trips: Dict[str, str] = {}  # driver_id -> trip_id
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Root endpoint with API documentation."""
-    return """
-    <html>
+    """Serve the dashboard HTML file."""
+    dashboard_file = Path(__file__).parent / "static" / "dashboard.html"
+    if dashboard_file.exists():
+        return FileResponse(str(dashboard_file))
+    else:
+        return HTMLResponse("""
+        <!DOCTYPE html>
+        <html>
         <head>
-            <title>Telematics Insurance API</title>
+            <title>Telematics Insurance Dashboard</title>
+            <style>body { font-family: Arial, sans-serif; text-align: center; margin: 50px; }</style>
         </head>
         <body>
-            <h1>Telematics Insurance API</h1>
-            <p>Welcome to the Telematics Insurance API!</p>
-            <p>Visit <a href="/docs">/docs</a> for interactive API documentation.</p>
-            <h2>Available Endpoints:</h2>
-            <ul>
-                <li><strong>POST /drivers</strong> - Create a new driver</li>
-                <li><strong>POST /vehicles</strong> - Register a vehicle</li>
-                <li><strong>POST /policies</strong> - Create an insurance policy</li>
-                <li><strong>POST /trips/start</strong> - Start a driving trip</li>
-                <li><strong>POST /trips/{trip_id}/stop</strong> - Stop a driving trip</li>
-                <li><strong>GET /dashboard/{driver_id}</strong> - Get dashboard summary</li>
-                <li><strong>GET /risk-score/{driver_id}</strong> - Get current risk score</li>
-                <li><strong>GET /trips/{driver_id}/recent</strong> - Get recent trips</li>
-            </ul>
+            <h1>🚗 Telematics Insurance Dashboard</h1>
+            <p>Dashboard file not found. Please check the static files.</p>
+            <p><a href="/docs">API Documentation</a></p>
         </body>
-    </html>
-    """
+        </html>
+        """)
 
 
 @app.post("/drivers")
@@ -313,8 +315,25 @@ async def stop_trip(trip_id: str):
 @app.get("/dashboard/{driver_id}", response_model=DashboardSummaryResponse)
 async def get_dashboard_summary(driver_id: str):
     """Get dashboard summary for a driver."""
-    if driver_id not in drivers_db:
-        raise HTTPException(status_code=404, detail="Driver not found")
+    # Check if driver exists in database
+    from ..db.engine import get_session_context
+    from ..db.repositories import DriverRepository
+    
+    from uuid import UUID
+    
+    with get_session_context() as session:
+        driver_repo = DriverRepository()
+        
+        # Convert string UUID to UUID object
+        try:
+            driver_uuid = UUID(driver_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid driver ID format")
+            
+        driver = driver_repo.get_by_id(session, driver_uuid)
+        
+        if not driver:
+            raise HTTPException(status_code=404, detail="Driver not found")
     
     summary = dashboard_service.get_dashboard_summary(driver_id)
     if not summary:
@@ -374,6 +393,27 @@ async def get_risk_breakdown(driver_id: str):
     
     breakdown = dashboard_service.get_risk_breakdown(driver_id)
     return breakdown
+
+
+@app.post("/login")
+async def login_by_email(email: str = Form(...)):
+    """Login by email address - finds driver by email."""
+    from ..db.engine import get_session_context
+    from ..db.repositories import DriverRepository
+    
+    with get_session_context() as session:
+        driver_repo = DriverRepository()
+        driver = driver_repo.get_by_email(session, email)
+        
+        if not driver:
+            raise HTTPException(status_code=404, detail="Driver not found with this email")
+        
+        return {
+            "driver_id": str(driver.id),
+            "name": driver.name,
+            "email": driver.email,
+            "message": "Login successful"
+        }
 
 
 @app.get("/health")
